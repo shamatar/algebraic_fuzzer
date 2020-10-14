@@ -14,7 +14,7 @@ fn main() {
     lain::driver::start_fuzzer(driver.clone(),
         move |mutator, _ctx: &mut (), _| {
             let mut generation_context = GenerationContext::create();
-            let mut targets = create_runners();
+            let mut targets = create_runners(false);
             let idx = mutator.gen_range(0, targets.len());
             let runner = &mut targets[idx];
 

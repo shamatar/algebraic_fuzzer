@@ -169,13 +169,25 @@ pub struct EIP2537Generator<R: Rng> {
     marker: std::marker::PhantomData<R>
 }
 
-pub fn create_runners<R: Rng>() -> Vec<FuzzerTarget<R>> {
+pub fn create_runners<R: Rng>(verbose: bool) -> Vec<FuzzerTarget<R>> {
     let g1_add_gen_fn = |_prelude: &[u8], mutator: &mut Mutator<R>, context: &mut GenerationContext<R>| {
         generate_g1_add_input(mutator, context)
     };
 
     let g1_add_run_fn = |input: &[u8]| {
-        EIP2537Executor::g1_add(input).map_err(|_| ()).map(|res| res.to_vec())
+        EIP2537Executor::g1_add(input).map_err(|err| {
+            if verbose {
+                println!("{}", err);
+            }
+
+            ()
+        }) 
+        .map(|res| {
+            if verbose {
+                println!("Got result!");
+            }
+            res.to_vec()
+        })
     };
 
     let g1_add_target = FuzzerTarget {
@@ -408,4 +420,34 @@ fn make_g2_in_invalid_subgroup<R: Rng>(rng: &mut R) -> Vec<u8> {
     };
 
     encode_g2(&p.unwrap())
+}
+
+#[test]
+fn test_g1_addition() {
+    let driver = lain::driver::FuzzerDriver::<()>::new(4);
+    let driver = std::sync::Arc::from(driver);
+
+    let ctrlc_driver = driver.clone();
+
+    ctrlc::set_handler(move || {
+        ctrlc_driver.signal_exit();
+    }).expect("couldn't set CTRL-C handler");
+
+    lain::driver::start_fuzzer(driver.clone(),
+        move |mutator, _ctx: &mut (), _| {
+            let mut generation_context = GenerationContext::create();
+            let mut targets = create_runners(true);
+            let idx = mutator.gen_range(0, targets.len());
+            let runner = &mut targets[idx];
+
+            let input = runner.generate(mutator, &mut generation_context);
+            let output = runner.run(&input);
+
+            Ok(())
+        }
+    );
+
+    driver.join_threads();
+
+    println!("Finished in {} iterations", driver.num_iterations());
 }
