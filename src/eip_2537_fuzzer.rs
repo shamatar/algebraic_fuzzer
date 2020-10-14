@@ -174,7 +174,7 @@ pub fn create_runners<R: Rng>(verbose: bool) -> Vec<FuzzerTarget<R>> {
         generate_g1_add_input(mutator, context)
     };
 
-    let g1_add_run_fn = |input: &[u8]| {
+    let g1_add_run_fn = move |input: &[u8]| {
         EIP2537Executor::g1_add(input).map_err(|err| {
             if verbose {
                 println!("{}", err);
