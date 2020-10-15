@@ -1,5 +1,6 @@
 use lain::prelude::*;
 use lain::rand::Rng;
+
 use derivative::*;
 use num_traits::*;
 use num_bigint::BigUint;
@@ -9,9 +10,10 @@ use eth_pairings::public_interface::{decode_fp, decode_g1, decode_g2};
 use eth_pairings::traits::*;
 use eth_pairings::square_root::*;
 use eth_pairings::public_interface::eip2537::EIP2537Executor;
-use std::sync::*;
+use eth_pairings_go_2537::*;
 
 pub struct GenerationContext<R: Rng> {
+    pub scalar_generation_fn: Box<dyn Fn(&mut Mutator<R>, ScalarGenerationFlags) -> Vec<u8> + Send + Sync + 'static>,
     pub fp_generation_fn: Box<dyn Fn(&mut Mutator<R>, FieldGenerationFlags) -> Vec<u8> + Send + Sync + 'static>,
     pub fp2_generation_fn: Box<dyn Fn(&mut Mutator<R>, FieldGenerationFlags) -> Vec<u8> + Send + Sync + 'static>,
     pub g1_generation_fn: Box<dyn Fn(&mut Mutator<R>, EcPointGenerationFlag) -> Vec<u8> + Send + Sync + 'static>,
@@ -20,11 +22,35 @@ pub struct GenerationContext<R: Rng> {
 
 impl<R: Rng> GenerationContext<R> {
     pub fn create() -> Self {
+        let scalar_generation_fn = move |mutator: &mut Mutator<R>, flags: ScalarGenerationFlags| {
+            match flags {
+                ScalarGenerationFlags::ValidWithPropabilityOfZero(prob) => {
+                    let make_zero = mutator.gen_chance(prob);
+                    let mut result = vec![0u8; SCALAR_BYTE_LENGTH];
+                    if !make_zero {
+                        mutator.rng_mut().fill_bytes(&mut result);
+                    }
+
+                    result
+                }
+                ScalarGenerationFlags::InvalidLength => {
+                    let len = mutator.gen_range(0, 64);
+                    let mut result = vec![0u8; len];
+                    mutator.rng_mut().fill_bytes(&mut result);
+
+                    result
+                },
+            }
+        };
+
         let modulus = BigUint::from_str_radix("4002409555221667393417789825735904156556882819939007885332058136124031650490837864442687629129015664037894272559787", 10).unwrap();
 
         let m = modulus.clone();
         let fp_generation_fn = move |mutator: &mut Mutator<R>, flags: FieldGenerationFlags| {
             match flags {
+                FieldGenerationFlags::CreateZero => {
+                    vec![0u8; SERIALIZED_FP_BYTE_LENGTH]
+                }
                 FieldGenerationFlags::CreateValid => {
                     let (_, enc) = make_random_fp_with_encoding(mutator.rng_mut(), &m);
 
@@ -42,6 +68,9 @@ impl<R: Rng> GenerationContext<R> {
         let m = modulus.clone();
         let fp2_generation_fn = move |mutator: &mut Mutator<R>, flags: FieldGenerationFlags| {
             match flags {
+                FieldGenerationFlags::CreateZero => {
+                    vec![0u8; SERIALIZED_FP2_BYTE_LENGTH]
+                },
                 FieldGenerationFlags::CreateValid => {
                     let (_, enc) = make_random_fp2_with_encoding(mutator.rng_mut(), &m);
 
@@ -59,6 +88,9 @@ impl<R: Rng> GenerationContext<R> {
         let m = modulus.clone();
         let g1_generation_fn = move |mutator: &mut Mutator<R>, flags: EcPointGenerationFlag| {
             match flags {
+                EcPointGenerationFlag::CreateInfinity => {
+                    vec![0u8; SERIALIZED_G1_POINT_BYTE_LENGTH]
+                },
                 EcPointGenerationFlag::CreateValid => {
                     let enc = make_random_g1_with_encoding(mutator.rng_mut());
 
@@ -92,6 +124,9 @@ impl<R: Rng> GenerationContext<R> {
         let m = modulus.clone();
         let g2_generation_fn = move |mutator: &mut Mutator<R>, flags: EcPointGenerationFlag| {
             match flags {
+                EcPointGenerationFlag::CreateInfinity => {
+                    vec![0u8; SERIALIZED_G2_POINT_BYTE_LENGTH]
+                },
                 EcPointGenerationFlag::CreateValid => {
                     let enc = make_random_g2_with_encoding(mutator.rng_mut());
 
@@ -123,6 +158,7 @@ impl<R: Rng> GenerationContext<R> {
         };
 
         Self {
+            scalar_generation_fn: Box::new(scalar_generation_fn) as _,
             fp_generation_fn: Box::new(fp_generation_fn) as _,
             fp2_generation_fn: Box::new(fp2_generation_fn) as _,
             g1_generation_fn: Box::new(g1_generation_fn) as _,
@@ -131,23 +167,51 @@ impl<R: Rng> GenerationContext<R> {
     }
 }
 
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct FuzzerTarget<R: Rng> {
+    pub op_name: &'static str,
+    #[derivative(Debug="ignore")]
     pub generator: Box<dyn Fn(&[u8], &mut Mutator<R>, &mut GenerationContext<R>) -> Vec<u8> + Send + Sync + 'static>,
-    pub executor: Box<dyn Fn(&[u8]) -> Result<Vec<u8>, ()> + Send + Sync + 'static>,
+    #[derivative(Debug="ignore")]
+    pub executor: Box<dyn Fn(&[u8]) -> Result<(), ()> + Send + Sync + 'static>,
 }
 
 impl<R: Rng> FuzzerTarget<R> {
     pub fn generate(&mut self, mutator: &mut Mutator<R>, context: &mut GenerationContext<R>) -> Vec<u8> {
         self.generator.as_mut()(&[], mutator, context)
     }
-    pub fn run(&self, input: &[u8]) -> Result<Vec<u8>, ()> {
+    pub fn run(&self, input: &[u8]) -> Result<(), ()> {
         self.executor.as_ref()(input)
+    }
+}
+#[derive(Derivative)]
+#[derivative(Clone, Debug, Copy, PartialEq, Eq)]
+pub enum ScalarGenerationFlags{
+    ValidWithPropabilityOfZero(f64),
+    InvalidLength
+}
+
+impl lain::traits::NewFuzzed for ScalarGenerationFlags {
+    type RangeType = ();
+    fn new_fuzzed<R>(mutator: &mut Mutator<R>, _: Option<&Constraints<<Self as lain::prelude::NewFuzzed>::RangeType>>) -> Self where R: Rng {
+        let variant = mutator.gen_range(0, 2);
+        match variant {
+            0 => {
+                ScalarGenerationFlags::ValidWithPropabilityOfZero(ZERO_SCALAR_PROBABILITY)
+            },
+            1 => {
+                ScalarGenerationFlags::InvalidLength
+            },
+            _ => {unreachable!()}
+        }
     }
 }
 
 #[derive(Derivative, Mutatable, NewFuzzed)]
 #[derivative(Clone, Debug, Copy, PartialEq, Eq)]
 pub enum FieldGenerationFlags {
+    CreateZero,
     CreateValid,
     CreateNotInField,
     CreateOtherInvalidEncoding
@@ -156,6 +220,7 @@ pub enum FieldGenerationFlags {
 #[derive(Derivative, Mutatable, NewFuzzed)]
 #[derivative(Clone, Debug, Copy, PartialEq, Eq)]
 pub enum EcPointGenerationFlag {
+    CreateInfinity,
     CreateValid,
     CreateNotOnCurve,
     CreateInvalidSubgroup,
@@ -169,33 +234,203 @@ pub struct EIP2537Generator<R: Rng> {
     marker: std::marker::PhantomData<R>
 }
 
+fn map_result_verbose<T: AsRef<[u8]>, R: std::fmt::Debug>(res: Result<T, R>, verbose: bool) -> Result<Vec<u8>, ()> {
+    res.map_err(|err| {
+        if verbose {
+            println!("{:?}", err);
+        }
+
+        ()
+    }) 
+    .map(|res| {
+        if verbose {
+            println!("Got result!");
+        }
+        res.as_ref().to_vec()
+    })
+}
+
+fn compare_results<T: Eq, R, U>(a: Result<T, R>, b: Result<T, U>) -> Result<(), ()>{
+    match (a, b) {
+        (Ok(a), Ok(b)) => {
+            if a != b {
+                return Err(())
+            }
+        },
+        (Ok(..), Err(..)) | (Err(..), Ok(..)) => {
+            return Err(())
+        },
+        _ => {}
+    }
+
+    Ok(())
+}
+
 pub fn create_runners<R: Rng>(verbose: bool) -> Vec<FuzzerTarget<R>> {
     let g1_add_gen_fn = |_prelude: &[u8], mutator: &mut Mutator<R>, context: &mut GenerationContext<R>| {
         generate_g1_add_input(mutator, context)
     };
 
     let g1_add_run_fn = move |input: &[u8]| {
-        EIP2537Executor::g1_add(input).map_err(|err| {
-            if verbose {
-                println!("{}", err);
-            }
+        let rust_result = map_result_verbose(EIP2537Executor::g1_add(input), verbose);
+        let go_result = map_result_verbose(perform_operation(OperationType::G1ADD, &input), verbose);
 
-            ()
-        }) 
-        .map(|res| {
-            if verbose {
-                println!("Got result!");
-            }
-            res.to_vec()
-        })
+        compare_results(rust_result, go_result)
     };
 
     let g1_add_target = FuzzerTarget {
+        op_name: "G1ADD",
         generator: Box::new(g1_add_gen_fn) as _,
         executor: Box::new(g1_add_run_fn) as _,
     };
 
-    vec![g1_add_target]
+    let g1_mul_gen_fn = |_prelude: &[u8], mutator: &mut Mutator<R>, context: &mut GenerationContext<R>| {
+        generate_g1_mul_input(mutator, context)
+    };
+
+    let g1_mul_run_fn = move |input: &[u8]| {
+        let rust_result = map_result_verbose(EIP2537Executor::g1_mul(input), verbose);
+        let go_result = map_result_verbose(perform_operation(OperationType::G1MUL, &input), verbose);
+
+        compare_results(rust_result, go_result)
+    };
+
+    let g1_mul_target = FuzzerTarget {
+        op_name: "G1MUL",
+        generator: Box::new(g1_mul_gen_fn) as _,
+        executor: Box::new(g1_mul_run_fn) as _,
+    };
+
+    let g1_multiexp_gen_fn = |_prelude: &[u8], mutator: &mut Mutator<R>, context: &mut GenerationContext<R>| {
+        generate_g1_multiexp_input(mutator, context)
+    };
+
+    let g1_multiexp_run_fn = move |input: &[u8]| {
+        let rust_result = map_result_verbose(EIP2537Executor::g1_multiexp(input), verbose);
+        let go_result = map_result_verbose(perform_operation(OperationType::G1MULTIEXP, &input), verbose);
+
+        compare_results(rust_result, go_result)
+    };
+
+    let g1_multiexp_target = FuzzerTarget {
+        op_name: "G1MULTIEXP",
+        generator: Box::new(g1_multiexp_gen_fn) as _,
+        executor: Box::new(g1_multiexp_run_fn) as _,
+    };
+
+    let g2_add_gen_fn = |_prelude: &[u8], mutator: &mut Mutator<R>, context: &mut GenerationContext<R>| {
+        generate_g2_add_input(mutator, context)
+    };
+
+    let g2_add_run_fn = move |input: &[u8]| {
+        let rust_result = map_result_verbose(EIP2537Executor::g2_add(input), verbose);
+        let go_result = map_result_verbose(perform_operation(OperationType::G2ADD, &input), verbose);
+
+        compare_results(rust_result, go_result)
+    };
+
+    let g2_add_target = FuzzerTarget {
+        op_name: "G2ADD",
+        generator: Box::new(g2_add_gen_fn) as _,
+        executor: Box::new(g2_add_run_fn) as _,
+    };
+
+    let g2_mul_gen_fn = |_prelude: &[u8], mutator: &mut Mutator<R>, context: &mut GenerationContext<R>| {
+        generate_g2_mul_input(mutator, context)
+    };
+
+    let g2_mul_run_fn = move |input: &[u8]| {
+        let rust_result = map_result_verbose(EIP2537Executor::g2_mul(input), verbose);
+        let go_result = map_result_verbose(perform_operation(OperationType::G2MUL, &input), verbose);
+
+        compare_results(rust_result, go_result)
+    };
+
+    let g2_mul_target = FuzzerTarget {
+        op_name: "G2MUL",
+        generator: Box::new(g2_mul_gen_fn) as _,
+        executor: Box::new(g2_mul_run_fn) as _,
+    };
+
+    let g2_multiexp_gen_fn = |_prelude: &[u8], mutator: &mut Mutator<R>, context: &mut GenerationContext<R>| {
+        generate_g2_multiexp_input(mutator, context)
+    };
+
+    let g2_multiexp_run_fn = move |input: &[u8]| {
+        let rust_result = map_result_verbose(EIP2537Executor::g2_multiexp(input), verbose);
+        let go_result = map_result_verbose(perform_operation(OperationType::G2MULTIEXP, &input), verbose);
+
+        compare_results(rust_result, go_result)
+    };
+
+    let g2_multiexp_target = FuzzerTarget {
+        op_name: "G2MULTIEXP",
+        generator: Box::new(g2_multiexp_gen_fn) as _,
+        executor: Box::new(g2_multiexp_run_fn) as _,
+    };
+
+    let pairing_gen_fn = |_prelude: &[u8], mutator: &mut Mutator<R>, context: &mut GenerationContext<R>| {
+        generate_pairing_input(mutator, context)
+    };
+
+    let pairing_run_fn = move |input: &[u8]| {
+        let rust_result = map_result_verbose(EIP2537Executor::pair(input), verbose);
+        let go_result = map_result_verbose(perform_operation(OperationType::PAIR, &input), verbose);
+
+        compare_results(rust_result, go_result)
+    };
+
+    let pairing_target = FuzzerTarget {
+        op_name: "PAIRING",
+        generator: Box::new(pairing_gen_fn) as _,
+        executor: Box::new(pairing_run_fn) as _,
+    };
+
+    let fp_map_gen_fn = |_prelude: &[u8], mutator: &mut Mutator<R>, context: &mut GenerationContext<R>| {
+        generate_fp_mapping_input(mutator, context)
+    };
+
+    let fp_map_run_fn = move |input: &[u8]| {
+        let rust_result = map_result_verbose(EIP2537Executor::map_fp_to_g1(input), verbose);
+        let go_result = map_result_verbose(perform_operation(OperationType::MAPFPTOG1, &input), verbose);
+
+        compare_results(rust_result, go_result)
+    };
+
+    let fp_map_target = FuzzerTarget {
+        op_name: "FPTOG1",
+        generator: Box::new(fp_map_gen_fn) as _,
+        executor: Box::new(fp_map_run_fn) as _,
+    };
+
+    let fp2_map_gen_fn = |_prelude: &[u8], mutator: &mut Mutator<R>, context: &mut GenerationContext<R>| {
+        generate_fp2_mapping_input(mutator, context)
+    };
+
+    let fp2_map_run_fn = move |input: &[u8]| {
+        let rust_result = map_result_verbose(EIP2537Executor::map_fp2_to_g2(input), verbose);
+        let go_result = map_result_verbose(perform_operation(OperationType::MAPFP2TOG2, &input), verbose);
+
+        compare_results(rust_result, go_result)
+    };
+
+    let fp2_map_target = FuzzerTarget {
+        op_name: "FP2TOG2",
+        generator: Box::new(fp2_map_gen_fn) as _,
+        executor: Box::new(fp2_map_run_fn) as _,
+    };
+
+    vec![
+        g1_add_target, 
+        g1_mul_target, 
+        g1_multiexp_target,
+        g2_add_target, 
+        g2_mul_target, 
+        g2_multiexp_target,
+        pairing_target,
+        fp_map_target,
+        fp2_map_target
+    ]
 }
 
 fn generate_g1_add_input<R: Rng>(mutator: &mut Mutator<R>, context: &mut GenerationContext<R>) -> Vec<u8> {
@@ -206,6 +441,121 @@ fn generate_g1_add_input<R: Rng>(mutator: &mut Mutator<R>, context: &mut Generat
     input.extend(context.g1_generation_fn.as_mut()(mutator, flag));
 
     input
+}
+
+fn generate_g1_mul_input<R: Rng>(mutator: &mut Mutator<R>, context: &mut GenerationContext<R>) -> Vec<u8> {
+    let mut input = vec![];
+    let mut flag = ScalarGenerationFlags::new_fuzzed(mutator, None);
+    if let ScalarGenerationFlags::ValidWithPropabilityOfZero(p) = &mut flag {
+        *p = ZERO_SCALAR_PROBABILITY;
+    }
+    input.extend(context.scalar_generation_fn.as_mut()(mutator, flag));
+    let flag = EcPointGenerationFlag::new_fuzzed(mutator, None);
+    input.extend(context.g1_generation_fn.as_mut()(mutator, flag));
+
+    input
+}
+
+fn generate_g1_multiexp_input<R: Rng>(mutator: &mut Mutator<R>, context: &mut GenerationContext<R>) -> Vec<u8> {
+    let mut input = vec![];
+    let num_pais = mutator.gen_range(MIN_MULTIEXP_PAIRS, MAX_MULTIEXP_PAIRS);
+    let gen_all_valid = mutator.gen_chance(0.9);
+    if gen_all_valid {
+        for _ in 0..num_pais {
+            let flag = ScalarGenerationFlags::ValidWithPropabilityOfZero(ZERO_SCALAR_PROBABILITY);
+            input.extend(context.scalar_generation_fn.as_mut()(mutator, flag));
+            let flag = EcPointGenerationFlag::CreateValid;
+            input.extend(context.g1_generation_fn.as_mut()(mutator, flag));
+        }
+    } else {
+        let mut flag = ScalarGenerationFlags::new_fuzzed(mutator, None);
+        if let ScalarGenerationFlags::ValidWithPropabilityOfZero(p) = &mut flag {
+            *p = ZERO_SCALAR_PROBABILITY;
+        }
+        input.extend(context.scalar_generation_fn.as_mut()(mutator, flag));
+        let flag = EcPointGenerationFlag::new_fuzzed(mutator, None);
+        input.extend(context.g1_generation_fn.as_mut()(mutator, flag));
+    }
+
+    input
+}
+
+fn generate_g2_add_input<R: Rng>(mutator: &mut Mutator<R>, context: &mut GenerationContext<R>) -> Vec<u8> {
+    let mut input = vec![];
+    let flag = EcPointGenerationFlag::new_fuzzed(mutator, None);
+    input.extend(context.g2_generation_fn.as_mut()(mutator, flag));
+    let flag = EcPointGenerationFlag::new_fuzzed(mutator, None);
+    input.extend(context.g2_generation_fn.as_mut()(mutator, flag));
+
+    input
+}
+
+fn generate_g2_mul_input<R: Rng>(mutator: &mut Mutator<R>, context: &mut GenerationContext<R>) -> Vec<u8> {
+    let mut input = vec![];
+    let mut flag = ScalarGenerationFlags::new_fuzzed(mutator, None);
+    if let ScalarGenerationFlags::ValidWithPropabilityOfZero(p) = &mut flag {
+        *p = ZERO_SCALAR_PROBABILITY;
+    }
+    input.extend(context.scalar_generation_fn.as_mut()(mutator, flag));
+    let flag = EcPointGenerationFlag::new_fuzzed(mutator, None);
+    input.extend(context.g2_generation_fn.as_mut()(mutator, flag));
+
+    input
+}
+
+fn generate_g2_multiexp_input<R: Rng>(mutator: &mut Mutator<R>, context: &mut GenerationContext<R>) -> Vec<u8> {
+    let mut input = vec![];
+    let num_pais = mutator.gen_range(MIN_MULTIEXP_PAIRS, MAX_MULTIEXP_PAIRS);
+    let gen_all_valid = mutator.gen_chance(0.9);
+    if gen_all_valid {
+        for _ in 0..num_pais {
+            let flag = ScalarGenerationFlags::ValidWithPropabilityOfZero(ZERO_SCALAR_PROBABILITY);
+            input.extend(context.scalar_generation_fn.as_mut()(mutator, flag));
+            let flag = EcPointGenerationFlag::CreateValid;
+            input.extend(context.g2_generation_fn.as_mut()(mutator, flag));
+        }
+    } else {
+        let mut flag = ScalarGenerationFlags::new_fuzzed(mutator, None);
+        if let ScalarGenerationFlags::ValidWithPropabilityOfZero(p) = &mut flag {
+            *p = ZERO_SCALAR_PROBABILITY;
+        }
+        input.extend(context.scalar_generation_fn.as_mut()(mutator, flag));
+        let flag = EcPointGenerationFlag::new_fuzzed(mutator, None);
+        input.extend(context.g2_generation_fn.as_mut()(mutator, flag));
+    }
+
+    input
+}
+
+fn generate_pairing_input<R: Rng>(mutator: &mut Mutator<R>, context: &mut GenerationContext<R>) -> Vec<u8> {
+    let mut input = vec![];
+    let num_pais = mutator.gen_range(MIN_PAIRING_PAIRS, MAX_PAIRING_PAIRS);
+    let gen_all_valid = mutator.gen_chance(0.9);
+    if gen_all_valid {
+        for _ in 0..num_pais {
+            let flag = EcPointGenerationFlag::CreateValid;
+            input.extend(context.g1_generation_fn.as_mut()(mutator, flag));
+            let flag = EcPointGenerationFlag::CreateValid;
+            input.extend(context.g2_generation_fn.as_mut()(mutator, flag));
+        }
+    } else {
+        let flag = EcPointGenerationFlag::new_fuzzed(mutator, None);
+        input.extend(context.g1_generation_fn.as_mut()(mutator, flag));
+        let flag = EcPointGenerationFlag::new_fuzzed(mutator, None);
+        input.extend(context.g2_generation_fn.as_mut()(mutator, flag));
+    }
+
+    input
+}
+
+fn generate_fp_mapping_input<R: Rng>(mutator: &mut Mutator<R>, context: &mut GenerationContext<R>) -> Vec<u8> {
+    let flag = FieldGenerationFlags::new_fuzzed(mutator, None);
+    context.fp_generation_fn.as_mut()(mutator, flag)
+}
+
+fn generate_fp2_mapping_input<R: Rng>(mutator: &mut Mutator<R>, context: &mut GenerationContext<R>) -> Vec<u8> {
+    let flag = FieldGenerationFlags::new_fuzzed(mutator, None);
+    context.fp2_generation_fn.as_mut()(mutator, flag)
 }
 
 use eth_pairings::field::*;
@@ -219,6 +569,13 @@ type Fp2Element = eth_pairings::extension_towers::fp2::Fp2<'static, U384Repr, Pr
 
 type G1 = eth_pairings::weierstrass::curve::CurvePoint<'static, CurveOverFpParameters<'static, U384Repr, PrimeField<U384Repr>>>;
 type G2 = eth_pairings::weierstrass::curve::CurvePoint<'static, CurveOverFp2Parameters<'static, U384Repr, PrimeField<U384Repr>>>;
+
+const ZERO_SCALAR_PROBABILITY: f64 = 0.001;
+const MIN_MULTIEXP_PAIRS: usize = 0;
+const MAX_MULTIEXP_PAIRS: usize = 192;
+
+const MIN_PAIRING_PAIRS: usize = 0;
+const MAX_PAIRING_PAIRS: usize = 5;
 
 const SCALAR_BYTE_LENGTH: usize = 32;
 const SERIALIZED_FP_BYTE_LENGTH: usize = 64;
@@ -350,13 +707,13 @@ fn make_random_g2_with_encoding<R: Rng>(rng: &mut R) -> Vec<u8> {
     as_vec
 }
 
-fn make_random_scalar_with_encoding<R: Rng>(rng: &mut R) -> Vec<u8> {
+fn make_random_scalar_with_encoding<R: Rng>(rng: &mut R) -> (Scalar, Vec<u8>) {
     let mut buff = vec![0u8; SCALAR_BYTE_LENGTH];
     rng.fill_bytes(&mut buff);
 
     let (scalar, _) = decode_g1::decode_scalar_representation(&buff, SCALAR_BYTE_LENGTH).unwrap();
 
-    buff
+    (scalar, buff)
 }
 
 fn make_g1_in_invalid_subgroup<R: Rng>(rng: &mut R) -> Vec<u8> {
@@ -366,7 +723,7 @@ fn make_g1_in_invalid_subgroup<R: Rng>(rng: &mut R) -> Vec<u8> {
 
     let mut fp_candidate = fp;
 
-    let mut p = None;
+    let p;
 
     loop {
         let mut rhs = fp_candidate.clone();
@@ -398,7 +755,7 @@ fn make_g2_in_invalid_subgroup<R: Rng>(rng: &mut R) -> Vec<u8> {
 
     let mut fp_candidate = fp;
 
-    let mut p = None;
+    let p;
     loop {
         let mut rhs = fp_candidate.clone();
         rhs.square();
@@ -422,32 +779,68 @@ fn make_g2_in_invalid_subgroup<R: Rng>(rng: &mut R) -> Vec<u8> {
     encode_g2(&p.unwrap())
 }
 
-#[test]
-fn test_g1_addition() {
-    let driver = lain::driver::FuzzerDriver::<()>::new(4);
+pub fn run(verbose: bool, threads: usize) {
+    let driver = lain::driver::FuzzerDriver::<()>::new(threads);
     let driver = std::sync::Arc::from(driver);
 
     let ctrlc_driver = driver.clone();
+    let stop_progress = std::sync::atomic::AtomicBool::new(false);
+    let stop_progress = std::sync::Arc::from(stop_progress);
+    let ctrlc_driver_stop_progress = stop_progress.clone();
 
     ctrlc::set_handler(move || {
+        ctrlc_driver_stop_progress.store(true, std::sync::atomic::Ordering::Relaxed);
         ctrlc_driver.signal_exit();
     }).expect("couldn't set CTRL-C handler");
 
     lain::driver::start_fuzzer(driver.clone(),
         move |mutator, _ctx: &mut (), _| {
             let mut generation_context = GenerationContext::create();
-            let mut targets = create_runners(true);
+            let mut targets = create_runners(verbose);
             let idx = mutator.gen_range(0, targets.len());
             let runner = &mut targets[idx];
 
             let input = runner.generate(mutator, &mut generation_context);
             let output = runner.run(&input);
 
+            if output.is_err() {
+                eprintln!("Mismatch on op {:?} with input {}", &*runner, hex::encode(&input));
+                return Err(())
+            }
+
             Ok(())
         }
     );
 
-    driver.join_threads();
+    let progress_driver = driver.clone();
 
-    println!("Finished in {} iterations", driver.num_iterations());
+    let progress_thread = std::thread::spawn(move || {
+        use console::Term;
+        use console::Style;
+
+        let green = Style::new().green();
+        let red = Style::new().red();
+
+        let term = Term::stdout();
+        loop {
+            let msg = format!(
+                "Done {} iterations, {} failed iterations", 
+                green.apply_to(format!("{}", progress_driver.num_iterations())), 
+                red.apply_to(format!("{}", progress_driver.num_failed_iterations()))
+            );
+            let _ = term.write_line(&msg);
+            std::thread::sleep(std::time::Duration::from_millis(3000));
+            let _ = term.clear_line();
+
+            let stop = stop_progress.load(std::sync::atomic::Ordering::Relaxed);
+            if stop {
+                break;
+            }
+        }
+    });
+
+    driver.join_threads();
+    progress_thread.join().unwrap();
+
+    println!("Finished in {} iterations, {} failed iterations", driver.num_iterations(), driver.num_failed_iterations());
 }

@@ -8,15 +8,16 @@ edition = "2018"
 
 [dependencies]
 eth_pairings = {git = "https://github.com/matter-labs/eip1962.git", branch = "fuzzer"}
+eth_pairings_go_2537 = {git = "https://github.com/shamatar/eip2537_go_bindings"}
 # eth_pairings = {path = "../eip1962", features = ["expose_inner", "eip_2537"] }
-rand = "0.7"
-rand_xorshift = "0.2"
 lain = "0.5"
 derivative = "2.1"
 once_cell = "1.*"
 num-bigint = "0.3"
 num-traits = "0.2"
 ctrlc = "3.1"
+hex = "0.4"
+console = "0.12"
 
 [[bin]]
 name = "eip2537"
