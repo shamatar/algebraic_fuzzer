@@ -133,7 +133,7 @@ impl<R: Rng> GenerationContext<R> {
 
                     input
                 }
-                FieldGenerationFlags::CreateInvalidLength => {
+                EcPointGenerationFlag::CreateInvalidLength => {
                     let len = mutator.gen_range(0, SERIALIZED_G1_POINT_BYTE_LENGTH * 2);
                     let mut result = vec![0u8; len];
                     mutator.rng_mut().fill_bytes(&mut result);
@@ -176,7 +176,7 @@ impl<R: Rng> GenerationContext<R> {
 
                     input
                 },
-                FieldGenerationFlags::CreateInvalidLength => {
+                EcPointGenerationFlag::CreateInvalidLength => {
                     let len = mutator.gen_range(0, SERIALIZED_G2_POINT_BYTE_LENGTH * 2);
                     let mut result = vec![0u8; len];
                     mutator.rng_mut().fill_bytes(&mut result);
