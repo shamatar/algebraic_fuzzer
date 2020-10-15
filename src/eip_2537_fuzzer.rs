@@ -63,6 +63,13 @@ impl<R: Rng> GenerationContext<R> {
                 FieldGenerationFlags::CreateOtherInvalidEncoding => {
                     make_invalid_encoding_fp(mutator.rng_mut(), &m, false)
                 },
+                FieldGenerationFlags::CreateInvalidLength => {
+                    let len = mutator.gen_range(0, SERIALIZED_FP_BYTE_LENGTH * 2);
+                    let mut result = vec![0u8; len];
+                    mutator.rng_mut().fill_bytes(&mut result);
+
+                    result
+                }
             }
         };
 
@@ -83,6 +90,13 @@ impl<R: Rng> GenerationContext<R> {
                 FieldGenerationFlags::CreateOtherInvalidEncoding => {
                     make_invalid_encoding_fp2(mutator.rng_mut(), &m, false)
                 },
+                FieldGenerationFlags::CreateInvalidLength => {
+                    let len = mutator.gen_range(0, SERIALIZED_FP2_BYTE_LENGTH * 2);
+                    let mut result = vec![0u8; len];
+                    mutator.rng_mut().fill_bytes(&mut result);
+
+                    result
+                }
             }
         };
 
@@ -119,6 +133,13 @@ impl<R: Rng> GenerationContext<R> {
 
                     input
                 }
+                FieldGenerationFlags::CreateInvalidLength => {
+                    let len = mutator.gen_range(0, SERIALIZED_G1_POINT_BYTE_LENGTH * 2);
+                    let mut result = vec![0u8; len];
+                    mutator.rng_mut().fill_bytes(&mut result);
+
+                    result
+                }
             }
         };
 
@@ -154,6 +175,13 @@ impl<R: Rng> GenerationContext<R> {
                     input.extend(make_invalid_encoding_fp2(mutator.rng_mut(), &m, false));
 
                     input
+                },
+                FieldGenerationFlags::CreateInvalidLength => {
+                    let len = mutator.gen_range(0, SERIALIZED_G2_POINT_BYTE_LENGTH * 2);
+                    let mut result = vec![0u8; len];
+                    mutator.rng_mut().fill_bytes(&mut result);
+
+                    result
                 }
             }
         };
@@ -238,7 +266,8 @@ pub enum FieldGenerationFlags {
     CreateZero,
     CreateValid,
     CreateNotInField,
-    CreateOtherInvalidEncoding
+    CreateOtherInvalidEncoding,
+    CreateInvalidLength
 }
 
 #[derive(Derivative, Mutatable, NewFuzzed)]
@@ -248,7 +277,8 @@ pub enum EcPointGenerationFlag {
     CreateValid,
     CreateNotOnCurve,
     CreateInvalidSubgroup,
-    CreateOtherInvalidEncoding
+    CreateOtherInvalidEncoding,
+    CreateInvalidLength
 }
 
 #[derive(Derivative)]
